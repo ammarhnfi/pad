@@ -1,9 +1,13 @@
-// Proxy ke Claude API. API key hanya hidup di sini (Supabase secrets),
+// Proxy ke Gemini API. API key hanya hidup di sini (Supabase secrets),
 // tidak pernah dikirim ke browser.
-import Anthropic from "npm:@anthropic-ai/sdk";
+//
+// Kontrak request/response ke frontend sengaja tidak diubah, jadi sisi klien
+// tidak perlu tahu provider mana yang dipakai di belakang.
 
-const MODEL = "claude-opus-5";
-const MAX_TOKENS = 16000;
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+// Bisa diganti tanpa ubah kode: supabase secrets set GEMINI_MODEL=...
+const MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-2.5-flash";
+const MAX_OUTPUT_TOKENS = 8192;
 
 const CORS = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOWED_ORIGIN") ?? "*",
@@ -47,92 +51,90 @@ function tujuanList(v: unknown) {
 }
 
 // ── Skema keluaran ────────────────────────────────────────────────────────────
-// Dipakai lewat structured outputs, jadi respons dijamin JSON valid sesuai bentuk ini.
+// Gemini memakai subset OpenAPI 3.0, bukan JSON Schema penuh: nama tipe
+// UPPERCASE dan "additionalProperties" tidak didukung, jadi tidak dipakai
+// di sini. propertyOrdering menjaga urutan field tetap stabil.
 
 const KESULITAN = ["Mudah", "Sedang", "Sulit"];
 
 function buildSchema(withEval: boolean) {
   const properties: Record<string, unknown> = {
-    ringkasan: { type: "string" },
-    kesulitan_keseluruhan: { type: "string", enum: KESULITAN },
+    ringkasan: { type: "STRING" },
+    kesulitan_keseluruhan: { type: "STRING", enum: KESULITAN },
     tahapan: {
-      type: "array",
+      type: "ARRAY",
       minItems: 4,
       maxItems: 6,
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
-          nomor: { type: "integer" },
-          judul: { type: "string" },
-          deskripsi: { type: "string" },
+          nomor: { type: "INTEGER" },
+          judul: { type: "STRING" },
+          deskripsi: { type: "STRING" },
           metode: {
-            type: "array",
+            type: "ARRAY",
             minItems: 1,
             maxItems: 2,
             items: {
-              type: "object",
+              type: "OBJECT",
               properties: {
-                nama: { type: "string" },
-                kelebihan: { type: "string" },
-                kekurangan: { type: "string" },
-                alternatif: { type: "string" },
+                nama: { type: "STRING" },
+                kelebihan: { type: "STRING" },
+                kekurangan: { type: "STRING" },
+                alternatif: { type: "STRING" },
               },
               required: ["nama", "kelebihan", "kekurangan", "alternatif"],
-              additionalProperties: false,
+              propertyOrdering: ["nama", "kelebihan", "kekurangan", "alternatif"],
             },
           },
-          alasan: { type: "string" },
-          kesulitan: { type: "string", enum: KESULITAN },
+          alasan: { type: "STRING" },
+          kesulitan: { type: "STRING", enum: KESULITAN },
         },
         required: ["nomor", "judul", "deskripsi", "metode", "alasan", "kesulitan"],
-        additionalProperties: false,
+        propertyOrdering: ["nomor", "judul", "deskripsi", "metode", "alasan", "kesulitan"],
       },
     },
     asumsi: {
-      type: "array",
+      type: "ARRAY",
       maxItems: 3,
       items: {
-        type: "object",
-        properties: { nama: { type: "string" }, cara_cek: { type: "string" } },
+        type: "OBJECT",
+        properties: { nama: { type: "STRING" }, cara_cek: { type: "STRING" } },
         required: ["nama", "cara_cek"],
-        additionalProperties: false,
+        propertyOrdering: ["nama", "cara_cek"],
       },
     },
     tools: {
-      type: "object",
+      type: "OBJECT",
       properties: {
-        r: { type: "array", maxItems: 3, items: { type: "string" } },
-        python: { type: "array", maxItems: 3, items: { type: "string" } },
+        r: { type: "ARRAY", maxItems: 3, items: { type: "STRING" } },
+        python: { type: "ARRAY", maxItems: 3, items: { type: "STRING" } },
       },
       required: ["r", "python"],
-      additionalProperties: false,
+      propertyOrdering: ["r", "python"],
     },
-    catatan: { type: "string" },
+    catatan: { type: "STRING" },
   };
 
   if (withEval) {
     properties.evaluasi_metode = {
-      type: "object",
+      type: "OBJECT",
       properties: {
-        metode: { type: "string" },
+        metode: { type: "STRING" },
         kesesuaian: {
-          type: "string",
+          type: "STRING",
           enum: ["Cocok", "Perlu Penyesuaian", "Kurang Cocok"],
         },
-        alasan: { type: "string" },
-        saran: { type: "string" },
+        alasan: { type: "STRING" },
+        saran: { type: "STRING" },
       },
       required: ["metode", "kesesuaian", "alasan", "saran"],
-      additionalProperties: false,
+      propertyOrdering: ["metode", "kesesuaian", "alasan", "saran"],
     };
   }
 
-  return {
-    type: "object",
-    properties,
-    required: Object.keys(properties),
-    additionalProperties: false,
-  };
+  const keys = Object.keys(properties);
+  return { type: "OBJECT", properties, required: keys, propertyOrdering: keys };
 }
 
 // ── Prompt ────────────────────────────────────────────────────────────────────
@@ -181,9 +183,9 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   if (req.method !== "POST") return fail("Metode tidak didukung.", "method_not_allowed", 405);
 
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) {
-    console.error("ANTHROPIC_API_KEY belum diset di secrets Supabase.");
+    console.error("GEMINI_API_KEY belum diset di secrets Supabase.");
     return fail("Server belum dikonfigurasi.", "missing_api_key", 500);
   }
 
@@ -211,52 +213,62 @@ Deno.serve(async (req) => {
     return fail("Jenis data dan tujuan analisis wajib diisi.", "missing_fields", 400);
   }
 
-  const client = new Anthropic({ apiKey });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/${MODEL}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: buildPrompt(input) }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: buildSchema(Boolean(input.metodePlanning)),
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+        },
+      }),
+    });
+  } catch (err) {
+    console.error("Gagal menghubungi Gemini API:", err);
+    return fail("Gagal menghubungi layanan model.", "upstream_unreachable", 502);
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error(`Gemini API membalas ${res.status}:`, detail.slice(0, 1000));
+
+    if (res.status === 400) return fail("Permintaan ke layanan model ditolak.", "upstream_bad_request", 500);
+    if (res.status === 401 || res.status === 403) return fail("Kredensial server ditolak.", "upstream_auth", 500);
+    if (res.status === 429) return fail("Kuota gratis sedang penuh, coba lagi sebentar lagi.", "rate_limited", 429);
+    return fail("Layanan model mengembalikan error.", "upstream_error", 502);
+  }
+
+  const data = await res.json().catch(() => null);
+
+  const blockReason = data?.promptFeedback?.blockReason;
+  if (blockReason) {
+    console.error("Permintaan diblokir filter Gemini:", blockReason);
+    return fail("Permintaan ini tidak bisa diproses.", "blocked", 422);
+  }
+
+  const candidate = data?.candidates?.[0];
+  if (candidate?.finishReason === "MAX_TOKENS") {
+    console.error("Jawaban terpotong karena maxOutputTokens.");
+    return fail("Jawaban terpotong, coba sederhanakan deskripsi.", "truncated", 502);
+  }
+
+  const text = (candidate?.content?.parts ?? [])
+    .map((p: { text?: string }) => p?.text ?? "")
+    .join("");
+
+  if (!text) {
+    console.error("Respons tanpa teks. finishReason:", candidate?.finishReason);
+    return fail("Model tidak mengembalikan jawaban.", "empty_response", 502);
+  }
 
   try {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      messages: [{ role: "user", content: buildPrompt(input) }],
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: buildSchema(Boolean(input.metodePlanning)),
-        },
-      },
-    });
-
-    if (response.stop_reason === "refusal") {
-      return fail("Permintaan ini tidak bisa diproses.", "refusal", 422);
-    }
-
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { text: string }).text)
-      .join("");
-
-    if (!text) {
-      console.error("Respons tanpa blok teks. stop_reason:", response.stop_reason);
-      return fail("Model tidak mengembalikan jawaban.", "empty_response", 502);
-    }
-
     return reply({ result: JSON.parse(text) });
-  } catch (err) {
-    console.error("Panggilan Claude API gagal:", err);
-
-    if (err instanceof Anthropic.AuthenticationError) {
-      return fail("Kredensial server ditolak.", "upstream_auth", 500);
-    }
-    if (err instanceof Anthropic.RateLimitError) {
-      return fail("Sedang ramai, coba lagi sebentar lagi.", "rate_limited", 429);
-    }
-    if (err instanceof Anthropic.APIConnectionError) {
-      return fail("Gagal menghubungi layanan model.", "upstream_unreachable", 502);
-    }
-    if (err instanceof Anthropic.APIError) {
-      const status = typeof err.status === "number" && err.status >= 500 ? 502 : 500;
-      return fail("Layanan model mengembalikan error.", "upstream_error", status);
-    }
-    return fail("Terjadi kesalahan tak terduga di server.", "internal_error", 500);
+  } catch {
+    console.error("Jawaban bukan JSON valid:", text.slice(0, 1000));
+    return fail("Jawaban model tidak bisa dibaca.", "invalid_json", 502);
   }
 });

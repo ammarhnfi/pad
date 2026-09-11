@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 
 // ── Konfigurasi backend ───────────────────────────────────────────────────────
-// API key Claude tidak pernah ada di sini. Browser hanya bicara ke Edge Function
+// API key tidak pernah ada di sini. Browser hanya bicara ke Edge Function
 // Supabase, yang menyimpan key-nya di server.
 
 const FN_URL = import.meta.env.VITE_SUPABASE_URL
