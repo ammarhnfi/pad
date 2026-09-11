@@ -1,0 +1,5 @@
+project_id = "pemandu-analisis-data"
+
+[functions.generate-roadmap]
+# Butuh Authorization: Bearer <anon key> agar fungsi tidak terbuka bebas.
+verify_jwt = true
