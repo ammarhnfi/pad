@@ -236,10 +236,33 @@ Deno.serve(async (req) => {
     const detail = await res.text().catch(() => "");
     console.error(`Gemini API membalas ${res.status}:`, detail.slice(0, 1000));
 
-    if (res.status === 400) return fail("Permintaan ke layanan model ditolak.", "upstream_bad_request", 500);
-    if (res.status === 401 || res.status === 403) return fail("Kredensial server ditolak.", "upstream_auth", 500);
-    if (res.status === 429) return fail("Kuota gratis sedang penuh, coba lagi sebentar lagi.", "rate_limited", 429);
-    return fail("Layanan model mengembalikan error.", "upstream_error", 502);
+    // Status upstream ikut ditampilkan ke pengguna supaya penyebabnya bisa
+    // dikenali tanpa harus membuka log server. Body error dari Gemini sengaja
+    // tidak diteruskan ke browser — isinya bisa memuat potongan request.
+    if (res.status === 400) {
+      return fail(
+        "Permintaan ke layanan model ditolak (400) — kemungkinan bentuk skema tidak diterima. Cek log server.",
+        "upstream_bad_request",
+        500,
+      );
+    }
+    if (res.status === 401 || res.status === 403) {
+      return fail("Kredensial server ditolak (" + res.status + "). Periksa secret GEMINI_API_KEY.", "upstream_auth", 500);
+    }
+    if (res.status === 404) {
+      return fail(
+        `Model "${MODEL}" tidak ditemukan (404). Setel secret GEMINI_MODEL ke nama model yang tersedia untuk API key ini.`,
+        "model_not_found",
+        500,
+      );
+    }
+    if (res.status === 429) {
+      return fail("Kuota gratis sedang penuh, coba lagi sebentar lagi.", "rate_limited", 429);
+    }
+    if (res.status === 503) {
+      return fail("Model sedang sibuk, coba lagi sebentar lagi.", "upstream_busy", 503);
+    }
+    return fail(`Layanan model mengembalikan error (${res.status}).`, "upstream_error", 502);
   }
 
   const data = await res.json().catch(() => null);

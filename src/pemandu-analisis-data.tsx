@@ -16,8 +16,10 @@ const FN_URL = import.meta.env.VITE_SUPABASE_URL
   : "";
 const FN_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 
-// Hanya status ini yang layak dicoba ulang; 400/401/422 tidak akan sembuh.
-const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+// Hanya status ini yang layak dicoba ulang. 500 sengaja TIDAK termasuk: Edge
+// Function memakainya khusus untuk salah konfigurasi (API key, nama model),
+// yang tidak akan pulih dengan dicoba lagi.
+const RETRYABLE = new Set([408, 429, 502, 503, 504]);
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
