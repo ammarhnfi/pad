@@ -7,25 +7,19 @@ import {
   ChevronDown, ChevronRight, Crosshair, XCircle
 } from "lucide-react";
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+// ── Konfigurasi backend ───────────────────────────────────────────────────────
+// API key Claude tidak pernah ada di sini. Browser hanya bicara ke Edge Function
+// Supabase, yang menyimpan key-nya di server.
 
-function repairJson(s) {
-  let inStr = false, esc = false;
-  const stack = [], out = [];
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]; out.push(c);
-    if (esc) { esc = false; continue; }
-    if (c === "\\") { esc = true; continue; }
-    if (c === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (c === "{" || c === "[") stack.push(c);
-    else if (c === "}" || c === "]") stack.pop();
-  }
-  if (inStr) out.push('"');
-  let res = out.join("").replace(/,\s*$/, "").replace(/,(\s*[}\]])/g, "$1");
-  while (stack.length) res += stack.pop() === "{" ? "}" : "]";
-  return res;
-}
+const FN_URL = import.meta.env.VITE_SUPABASE_URL
+  ? `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-roadmap`
+  : "";
+const FN_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+
+// Hanya status ini yang layak dicoba ulang; 400/401/422 tidak akan sembuh.
+const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function getEvalStyle(kesesuaian) {
   const k = (kesesuaian || "").toLowerCase();
@@ -62,7 +56,7 @@ function ArrowConn() {
   );
 }
 
-function Pill({ active, onClick, children }) {
+function Pill({ active, onClick, children }: any) {
   return (
     <button
       onClick={onClick}
@@ -538,60 +532,69 @@ export default function App() {
   const applyEx   = c  => { setJenisVar(c.s.jenis); setStruktur(c.s.str); setUkuran(c.s.uk); setTarget(c.s.tg); setDeskripsi(c.s.desk); setTujuan(c.s.tuj); setMetodePlanning(""); setResult(null); setError(""); };
   const reset     = () => { setJenisVar([]); setStruktur(""); setUkuran(""); setTarget(""); setDeskripsi(""); setMetodePlanning(""); setTujuan([]); setResult(null); setError(""); setShowPrint(false); };
 
-  function buildPrompt() {
-    const jL = jenisVar.map(id => jenisOpts.find(o => o.id === id)?.label).join(", ") || "N/A";
-    const tL = tujuan.map(id => { const o = allTujuan.find(x => x.id === id); return o ? `${o.label}(${o.desc})` : id; }).join(" + ") || "N/A";
-    const isS  = tujuan.some(id => ["regresi","klasifikasi","forecasting"].includes(id));
-    const isU  = tujuan.some(id => ["clustering","reduksi","anomali"].includes(id));
-    const isSp = jenisVar.includes("spasial") || tujuan.includes("spasialA");
-    const hasPlan = metodePlanning.trim().length > 0;
-    const metodeInstr = hasPlan ? `\nMETODE YANG DIRENCANAKAN: "${metodePlanning.trim()}"\n→ Evaluasi kesesuaiannya. Integrasikan dalam tahapan jika cocok. Wajib sertakan "evaluasi_metode".` : "";
-    const evalSchema  = hasPlan ? `,"evaluasi_metode":{"metode":"${metodePlanning.trim()}","kesesuaian":"Cocok|Perlu Penyesuaian|Kurang Cocok","alasan":"penilaian 1-2 kalimat","saran":"rekomendasi konkret 1 kalimat"}` : "";
-    return `Kamu konsultan statistika & data science. Buat peta jalan analisis berdasarkan:
-DATA: jenis=${jL}, struktur=${struktur||"N/A"}, sampel=${ukuran||"N/A"}, target=${target||"N/A"}${isS?", supervised":""}${isU?", unsupervised":""}${isSp?", spasial":""}
-Deskripsi: ${deskripsi||"(tidak ada)"}
-TUJUAN: ${tL}${metodeInstr}
-Jawab HANYA satu objek JSON valid (bahasa Indonesia), tanpa preamble, tanpa markdown:
-{"ringkasan":"2 kalimat","kesulitan_keseluruhan":"Mudah|Sedang|Sulit","tahapan":[{"nomor":1,"judul":"singkat","deskripsi":"1 kalimat","metode":[{"nama":"nama","kelebihan":"1 frase","kekurangan":"1 frase","alternatif":"nama alternatif"}],"alasan":"1 kalimat","kesulitan":"Mudah|Sedang|Sulit"}],"asumsi":[{"nama":"asumsi","cara_cek":"cara cek"}],"tools":{"r":["pkg"],"python":["lib"]},"catatan":"1 kalimat"${evalSchema}}
-Aturan: 4-6 tahapan, maks 2 metode/tahap, maks 3 asumsi, maks 3 tools per bahasa. Teks sangat padat.`;
-  }
-
-  function tryParse(text) {
-    let s = text.replace(/```json/g, "").replace(/```/g, "").trim();
-    const a = s.indexOf("{");
-    if (a === -1) return null;
-    const b = s.lastIndexOf("}");
-    s = b > a ? s.slice(a, b + 1) : s.slice(a);
-    try { return JSON.parse(s); } catch (_) {}
-    try { return JSON.parse(repairJson(s)); } catch (_) {}
-    return null;
+  function buildPayload() {
+    return {
+      jenis: jenisVar.map(id => jenisOpts.find(o => o.id === id)?.label).filter(Boolean),
+      struktur,
+      ukuran,
+      target,
+      deskripsi: deskripsi.trim(),
+      tujuan: tujuan.map(id => allTujuan.find(o => o.id === id)).filter(Boolean)
+                    .map(o => ({ label: o.label, desc: o.desc })),
+      supervised:   tujuan.some(id => ["regresi","klasifikasi","forecasting"].includes(id)),
+      unsupervised: tujuan.some(id => ["clustering","reduksi","anomali"].includes(id)),
+      spasial:      jenisVar.includes("spasial") || tujuan.includes("spasialA"),
+      metodePlanning: metodePlanning.trim(),
+    };
   }
 
   async function generate() {
+    if (!FN_URL || !FN_KEY) {
+      setError("Konfigurasi server belum lengkap. Isi VITE_SUPABASE_URL dan VITE_SUPABASE_ANON_KEY di file .env, lalu jalankan ulang aplikasi.");
+      return;
+    }
+
     setLoading(true); setError(""); setResult(null);
-    const prompt = buildPrompt();
-    let parsed = null;
-    for (let i = 0; i < 2 && !parsed; i++) {
+    const payload = buildPayload();
+    let pesan = "";
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise(r => setTimeout(r, 600 * 2 ** (attempt - 1)));
       try {
-        const r = await fetch("https://api.anthropic.com/v1/messages", {
+        const r = await fetch(FN_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, messages:[{ role:"user", content:prompt }] }),
+          headers: { "Content-Type":"application/json", Authorization:`Bearer ${FN_KEY}`, apikey: FN_KEY },
+          body: JSON.stringify(payload),
         });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
-        parsed = tryParse(d.content.filter(b => b.type === "text").map(b => b.text).join("\n"));
-      } catch (e) { console.error(e); }
+        const body = await r.json().catch(() => null);
+
+        if (r.ok && body?.result?.tahapan?.length) {
+          setResult(body.result);
+          setTab("detail");
+          setTimeout(() => resultRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }), 100);
+          setLoading(false);
+          return;
+        }
+
+        if (r.ok) {
+          console.error("Respons tidak sesuai skema:", body);
+          pesan = "Server mengembalikan jawaban yang tidak lengkap.";
+          break;
+        }
+
+        console.error("generate-roadmap gagal:", r.status, body);
+        pesan = body?.error?.message || `Server membalas ${r.status}.`;
+        if (!RETRYABLE.has(r.status)) break;
+      } catch (e) {
+        console.error(e);
+        pesan = "Tidak bisa terhubung ke server. Cek koneksi internetmu.";
+      }
     }
-    if (parsed?.tahapan?.length) {
-      setResult(parsed);
-      setTab("detail");
-      setTimeout(() => resultRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }), 100);
-    } else {
-      setError("Maaf, terjadi kendala. Coba tekan tombolnya lagi ya.");
-    }
+
+    setError(pesan || "Maaf, terjadi kendala. Coba tekan tombolnya lagi ya.");
     setLoading(false);
   }
+
 
   const canSubmit  = tujuan.length > 0 && jenisVar.length > 0 && !loading;
   const jenisStr   = jenisVar.map(id => jenisOpts.find(o => o.id === id)?.label).join(", ");
